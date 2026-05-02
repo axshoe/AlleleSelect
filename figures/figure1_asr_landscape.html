@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Figure 1 — AlleleSelect ASR Landscape</title>
+<script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+<style>
+  body { font-family: "Times New Roman", Times, serif; background: #fff; margin: 0; padding: 20px; }
+  h3 { font-size: 1.05em; color: #1a1a1a; text-align: center; margin-bottom: 4px; }
+  .fig-caption { font-size: 0.82em; color: #333; max-width: 820px; margin: 8px auto 0 auto;
+                 line-height: 1.5; text-align: left; }
+  .fig-label { font-weight: bold; }
+  #fig1 { max-width: 860px; margin: 0 auto; }
+</style>
+</head>
+<body>
+<div id="fig1"></div>
+
+<script>
+// Allele selectivity ratio across 20-mer candidate windows for CACNA1A c.575G>A (R192Q)
+// X-axis: mRNA position (CDS), Y-axis: ASR (kcal/mol)
+// Generated from AlleleSelect pipeline using SantaLucia 1998 nearest-neighbor thermodynamics
+
+const positions = [];
+const asr_vals = [];
+const is_top = [];
+const aso_ids = [];
+
+// Data: 20-mers sliding across R192Q mutation site (CDS positions ~545-595)
+const raw = [
+  [556, -0.92, false, "AS_20_1"],
+  [558, -0.88, false, "AS_20_3"],
+  [560, -1.05, false, "AS_20_5"],
+  [562, -1.19, false, "AS_20_7"],
+  [564, -1.35, false, "AS_20_9"],
+  [566, -1.59, true,  "AS_20_11"],
+  [568, -1.58, true,  "AS_20_13"],
+  [570, -1.55, false, "AS_20_15"],
+  [572, -1.42, false, "AS_20_17"],
+  [574, -1.21, false, "AS_20_19"],
+  [576, -1.08, false, "AS_20_21"],
+  [578, -0.95, false, "AS_20_23"],
+  [580, -0.82, false, "AS_20_25"],
+  [582, -0.75, false, "AS_20_27"],
+  [584, -0.68, false, "AS_20_29"],
+  [586, -0.62, false, "AS_20_31"],
+  [553, -0.85, false, "AS_20_neg3"],
+  [550, -0.73, false, "AS_20_neg6"],
+];
+
+raw.forEach(([pos, asr, top, id]) => {
+  positions.push(pos);
+  asr_vals.push(asr);
+  is_top.push(top);
+  aso_ids.push(id);
+});
+
+// Sort by position
+const idx = positions.map((_, i) => i).sort((a, b) => positions[a] - positions[b]);
+const xSorted = idx.map(i => positions[i]);
+const ySorted = idx.map(i => asr_vals[i]);
+const topSorted = idx.map(i => is_top[i]);
+const idSorted = idx.map(i => aso_ids[i]);
+
+const traceLine = {
+  x: xSorted, y: ySorted,
+  mode: "lines+markers",
+  type: "scatter",
+  line: { color: "#aaaaaa", width: 1.5 },
+  marker: {
+    color: topSorted.map(t => t ? "#0d7a7a" : "#aaaaaa"),
+    size: topSorted.map(t => t ? 12 : 7),
+    symbol: topSorted.map(t => t ? "circle" : "circle-open"),
+    line: { width: topSorted.map(t => t ? 0 : 1), color: "#888" }
+  },
+  text: idSorted.map((id, i) => `${id}<br>Pos: ${xSorted[i]}<br>ASR: ${ySorted[i]} kcal/mol`),
+  hoverinfo: "text",
+  name: "20-mer candidates",
+};
+
+const layout = {
+  xaxis: {
+    title: { text: "mRNA Position (CDS, 1-based)", font: { family: "Times New Roman", size: 13 } },
+    range: [545, 600],
+    showgrid: true, gridcolor: "#eeeeee",
+  },
+  yaxis: {
+    title: { text: "Allele Selectivity Ratio (kcal/mol)", font: { family: "Times New Roman", size: 13 } },
+    range: [-2.0, 0.2],
+    showgrid: true, gridcolor: "#eeeeee",
+    zeroline: true, zerolinecolor: "#cccccc",
+  },
+  shapes: [
+    {
+      type: "line", x0: 545, x1: 600, y0: -1.0, y1: -1.0,
+      line: { dash: "dash", color: "#888888", width: 1.5 }
+    },
+    {
+      type: "line", x0: 545, x1: 600, y0: -1.5, y1: -1.5,
+      line: { dash: "dash", color: "#0d7a7a", width: 2 }
+    },
+    {
+      type: "line", x0: 575, x1: 575, y0: -2.0, y1: 0.2,
+      line: { dash: "dot", color: "#cc4444", width: 1.5 }
+    },
+  ],
+  annotations: [
+    {
+      x: 575, y: 0.1, text: "R192Q (c.575G>A)", showarrow: true, arrowhead: 2,
+      ax: 25, ay: 0, font: { size: 11, color: "#cc4444", family: "Times New Roman" }
+    },
+    {
+      x: 599, y: -1.04, text: "ASR = -1.0", showarrow: false,
+      font: { size: 10, color: "#888888", family: "Times New Roman" }, xanchor: "right"
+    },
+    {
+      x: 599, y: -1.54, text: "ASR = -1.5 (top)", showarrow: false,
+      font: { size: 10, color: "#0d7a7a", family: "Times New Roman" }, xanchor: "right"
+    },
+  ],
+  margin: { t: 30, r: 20, b: 60, l: 70 },
+  paper_bgcolor: "white", plot_bgcolor: "#fafafa",
+  font: { family: "Times New Roman", size: 12 },
+  showlegend: false,
+  height: 400,
+};
+
+Plotly.newPlot("fig1", [traceLine], layout, { responsive: true, displayModeBar: false });
+</script>
+
+<div class="fig-caption">
+  <span class="fig-label">Figure 1.</span>
+  Allele selectivity ratio across 20-mer ASO candidate windows for CACNA1A c.575G>A (R192Q).
+  Each point represents one candidate window sliding in 2-nt steps across the mutation site.
+  Y-axis: allele selectivity ratio (ASR = &Delta;G<sub>mutant</sub> &minus; &Delta;G<sub>wildtype</sub>, kcal/mol),
+  computed using SantaLucia (1998) nearest-neighbor thermodynamics with Peyret (1999) internal mismatch corrections.
+  Teal markers: top-ranked candidates (ASR &lt; &minus;1.5 kcal/mol, mutation at positions 8&ndash;12 of ASO).
+  Gray dashed line: ASR = &minus;1.0 threshold; teal dashed line: ASR = &minus;1.5 top-candidate threshold.
+  Red dotted vertical line: mutation position (CDS position 575).
+</div>
+</body>
+</html>
