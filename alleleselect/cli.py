@@ -121,15 +121,34 @@ def run(args) -> None:
     # 4. mRNA accessibility scoring
     if not args.no_rnafold:
         print("[AlleleSelect] Running RNAfold accessibility scoring...")
+        import tempfile as _tempfile
+        import os as _os
         from alleleselect.sequence.fetcher import extract_window
         window_seq, window_start = extract_window(wt_cds, parsed["position"], flank=200)
-        rnafold_result = run_rnafold(window_seq)
+
+        # Explicit work_dir so we can diagnose what files RNAfold actually writes
+        rnafold_work_dir = _tempfile.mkdtemp(prefix="alleleselect_rnafold_diag_")
+        print(f"  [diag] RNAfold work_dir: {rnafold_work_dir}")
+        print(f"  [diag] window_seq length: {len(window_seq)} nt")
+
+        rnafold_result = run_rnafold(window_seq, work_dir=rnafold_work_dir)
+
+        try:
+            files_in_workdir = _os.listdir(rnafold_work_dir)
+        except Exception:
+            files_in_workdir = ["(could not list)"]
+        print(f"  [diag] files in work_dir after RNAfold: {files_in_workdir}")
+        print(f"  [diag] bp_matrix size: {len(rnafold_result['bp_matrix'])} pairs")
+        if rnafold_result['per_base_unpaired']:
+            sample = rnafold_result['per_base_unpaired'][:5]
+            print(f"  [diag] first 5 accessibility values: {[round(v,3) for v in sample]}")
+
         for c in candidates:
             acc = compute_window_accessibility(
                 rnafold_result["per_base_unpaired"],
                 c["mRNA_start"],
                 c["mRNA_end"],
-                cds_start_in_sequence=window_start - 1,
+                cds_start_in_sequence=1 - window_start,
             )
             c["accessibility_score"] = acc
         log(f"  RNAfold complete. Mean accessibility: {sum(c['accessibility_score'] for c in candidates)/len(candidates):.3f}")

@@ -25,3 +25,6 @@ alleleselect_output/
 *.nto
 .pytest_cache/
 .DS_Store
+my_*/
+.idea/
+*.ps
