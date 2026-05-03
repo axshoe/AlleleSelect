@@ -2,7 +2,7 @@
 
 **Allele-Selective ASO Design Pipeline for CACNA1A Gain-of-Function Mutations**
 
-The Xiu Lab | [thexiulab.org](https://thexiulab.org) | [github.com/axshoe/alleleselect](https://github.com/axshoe/alleleselect)
+The Xiu Lab | [thexiulab.org](https://www.thexiulab.org/current-projects/alleleselect) | [github.com/axshoe/alleleselect](https://github.com/axshoe/alleleselect)
 
 ---
 
@@ -73,11 +73,6 @@ python -m pytest tests/ -v
 
 ## Contact / collaboration
 
-This tool was designed to produce output ready for submission to:
-- van den Maagdenberg lab (Leiden): R192Q knockin mouse model
-- CACNA1A Foundation: pangkong@cacna1a.org
-- ASO4Kids program (Matias Wagner, TU Munich)
-
 Questions: angie.xiu27@gmail.com | The Xiu Lab: [thexiulab.org](https://thexiulab.org)
 
 ## Limitations
@@ -89,5 +84,3 @@ AlleleSelect is a research-grade computational design tool. All candidates requi
 MIT License. See LICENSE.
 
 ---
-
-*Part of the Cure Pathway track of The Xiu Lab's CACNA1A/FHM1 research series.*
