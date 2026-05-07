@@ -1,285 +1,306 @@
 """
-report.py
-Generates ranked CSV output and interactive HTML report for AlleleSelect results.
-HTML report includes:
-    - Top 20 candidates table with sortable columns
-    - Allele selectivity vs. accessibility scatter plot (Plotly)
-    - mRNA secondary structure arc diagram with candidate window overlays
-    - Summary statistics section
+alleleselect/output/report.py  (v2)
+
+Writes candidates.csv and report.html.
+v2: adds composite_score, snp_pos_in_aso, snp_pos_score, snp_region,
+    tox_summary, tox_serious, tox_warning, tox_flags to CSV output.
 """
 
+from __future__ import annotations
 import csv
 import os
-import json
-from datetime import datetime
+import html as html_module
+from typing import List, Dict, Any
 
 
-def save_csv(candidates: list, output_path: str) -> None:
-    """
-    Save ranked candidates to CSV with all scored fields.
+# ─── CSV column order ─────────────────────────────────────────────────────────
+# v1 columns preserved in original order; v2 columns appended at end.
+CSV_FIELDS = [
+    # --- v1 columns ---
+    "priority_rank",
+    "ASO_ID",
+    "ASO_sequence",
+    "length",
+    "mRNA_start_position",
+    "mRNA_end_position",
+    "mutation_position_in_ASO",
+    "delta_G_mutant_kcal_mol",
+    "delta_G_wildtype_kcal_mol",
+    "allele_selectivity_ratio_kcal_mol",
+    "Tm_mutant_C",
+    "Tm_wildtype_C",
+    "mRNA_accessibility_score",
+    "off_target_count",
+    "splice_risk",
+    "ps_toxicity_flag",
+    "recommended_gapmer_pattern",
+    "top_candidate",
+    # --- v2 columns ---
+    "composite_score",
+    "snp_pos_in_aso",
+    "snp_pos_score",
+    "snp_region",
+    "tox_summary",
+    "tox_serious",
+    "tox_warning",
+    "tox_flags",
+]
 
-    Columns: ASO_ID, ASO_sequence, length, mRNA_start_position, mRNA_end_position,
-             mutation_position_in_ASO, delta_G_mutant, delta_G_wildtype,
-             allele_selectivity_ratio, Tm_mutant, Tm_wildtype,
-             mRNA_accessibility_score, off_target_count, splice_risk,
-             recommended_gapmer_pattern, priority_rank
-    """
-    fieldnames = [
-        "priority_rank",
-        "ASO_ID",
-        "ASO_sequence",
-        "length",
-        "mRNA_start_position",
-        "mRNA_end_position",
-        "mutation_position_in_ASO",
-        "delta_G_mutant_kcal_mol",
-        "delta_G_wildtype_kcal_mol",
-        "allele_selectivity_ratio_kcal_mol",
-        "Tm_mutant_C",
-        "Tm_wildtype_C",
-        "mRNA_accessibility_score",
-        "off_target_count",
-        "splice_risk",
-        "ps_toxicity_flag",
-        "recommended_gapmer_pattern",
-        "top_candidate",
-    ]
+# Map from internal candidate dict keys → CSV column names
+# (only needed where they differ)
+_KEY_MAP = {
+    "aso_seq":                    "ASO_sequence",
+    "ASO_ID":                     "ASO_ID",
+    "mRNA_start":                 "mRNA_start_position",
+    "mRNA_end":                   "mRNA_end_position",
+    "mutation_pos_in_aso":        "mutation_position_in_ASO",
+    "delta_G_mutant":             "delta_G_mutant_kcal_mol",
+    "delta_G_wildtype":           "delta_G_wildtype_kcal_mol",
+    "allele_selectivity_ratio":   "allele_selectivity_ratio_kcal_mol",
+    "Tm_mutant":                  "Tm_mutant_C",
+    "Tm_wildtype":                "Tm_wildtype_C",
+    "accessibility_score":        "mRNA_accessibility_score",
+    "off_target_count":           "off_target_count",
+    "splice_risk":                "splice_risk",
+    "ps_toxicity_flag":           "ps_toxicity_flag",
+    "recommended_gapmer_pattern": "recommended_gapmer_pattern",
+    "top_candidate":              "top_candidate",
+    # v2
+    "composite_score":            "composite_score",
+    "snp_pos_in_aso":             "snp_pos_in_aso",
+    "snp_pos_score":              "snp_pos_score",
+    "snp_region":                 "snp_region",
+    "tox_summary":                "tox_summary",
+    "tox_serious":                "tox_serious",
+    "tox_warning":                "tox_warning",
+    "tox_flags":                  "tox_flags",
+}
 
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
 
-    with open(output_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+def _candidate_to_row(rank: int, c: Dict[str, Any]) -> Dict[str, Any]:
+    """Flatten a candidate dict into a flat CSV row dict."""
+    row: Dict[str, Any] = {}
+
+    # Map all known keys
+    for src_key, csv_col in _KEY_MAP.items():
+        if src_key in c:
+            row[csv_col] = c[src_key]
+
+    # Fields that are already named correctly in the candidate dict
+    for field in CSV_FIELDS:
+        if field in c and field not in row:
+            row[field] = c[field]
+
+    # Derived / positional
+    row["priority_rank"] = rank
+    row["length"] = len(c.get("aso_seq", "")) or c.get("length", "")
+
+    # Ensure all CSV_FIELDS have a value (default empty string)
+    for f in CSV_FIELDS:
+        if f not in row:
+            row[f] = ""
+
+    return row
+
+
+def save_csv(candidates: List[Dict[str, Any]], path: str) -> None:
+    """Write all candidates to a CSV file with v1 + v2 columns."""
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
         writer.writeheader()
         for rank, c in enumerate(candidates, 1):
-            row = {
-                "priority_rank": rank,
-                "ASO_ID": c.get("ASO_ID", f"AS_{rank}"),
-                "ASO_sequence": c.get("aso_seq", ""),
-                "length": c.get("length", len(c.get("aso_seq", ""))),
-                "mRNA_start_position": c.get("mRNA_start", ""),
-                "mRNA_end_position": c.get("mRNA_end", ""),
-                "mutation_position_in_ASO": c.get("mutation_pos_in_aso", ""),
-                "delta_G_mutant_kcal_mol": round(c.get("dG_mutant", 0), 3),
-                "delta_G_wildtype_kcal_mol": round(c.get("dG_wildtype", 0), 3),
-                "allele_selectivity_ratio_kcal_mol": round(c.get("allele_selectivity_ratio", 0), 3),
-                "Tm_mutant_C": round(c.get("Tm_mutant", 0), 1),
-                "Tm_wildtype_C": round(c.get("Tm_wildtype", 0), 1),
-                "mRNA_accessibility_score": round(c.get("accessibility_score", 0.5), 3),
-                "off_target_count": c.get("off_target_count", -1),
-                "splice_risk": c.get("splice_risk", "UNKNOWN"),
-                "ps_toxicity_flag": c.get("ps_toxicity_flag", False),
-                "recommended_gapmer_pattern": c.get("recommended_gapmer_pattern", ""),
-                "top_candidate": c.get("top_candidate", False),
-            }
+            row = _candidate_to_row(rank, c)
             writer.writerow(row)
+    print(f"CSV saved: {path}")
 
-    print(f"CSV saved: {output_path}")
+
+# ─── HTML report ──────────────────────────────────────────────────────────────
+
+def _fmt(val: Any, decimals: int = 3) -> str:
+    if val == "" or val is None:
+        return ""
+    try:
+        f = float(val)
+        return f"{f:.{decimals}f}"
+    except (ValueError, TypeError):
+        return str(val)
 
 
 def save_html_report(
-    candidates: list,
+    candidates: List[Dict[str, Any]],
     variant_label: str,
-    output_path: str,
-    mrna_structure: dict = None,
+    path: str,
 ) -> None:
-    """
-    Generate interactive HTML report with sortable table and Plotly scatter plot.
+    """Write an interactive HTML report with sortable table."""
+    os.makedirs(os.path.dirname(path) if os.path.dirname(path) else ".", exist_ok=True)
 
-    Parameters
-    ----------
-    candidates : list of scored candidate dicts
-    variant_label : str, e.g. "CACNA1A c.575G>A (R192Q)"
-    output_path : str
-    mrna_structure : dict with 'per_base_unpaired' and 'mfe_structure' (optional)
-    """
-    top_20 = candidates[:20]
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    top5 = candidates[:5]
 
-    # Prepare data for scatter plot
-    scatter_data = []
-    for rank, c in enumerate(candidates[:100], 1):
-        asr = c.get("allele_selectivity_ratio", 0)
-        acc = c.get("accessibility_score", 0.5)
-        ot = c.get("off_target_count", -1)
-        is_top = c.get("top_candidate", False)
-        scatter_data.append({
-            "rank": rank,
-            "aso_id": c.get("ASO_ID", ""),
-            "asr": round(asr, 3),
-            "accessibility": round(acc, 3),
-            "off_target": ot,
-            "top": is_top,
-            "length": c.get("length", 0),
-            "splice_risk": c.get("splice_risk", "N"),
-            "aso_seq": c.get("aso_seq", ""),
-        })
+    def esc(s: Any) -> str:
+        return html_module.escape(str(s))
 
-    # Table rows HTML
-    table_rows = ""
-    for rank, c in enumerate(top_20, 1):
-        is_top = c.get("top_candidate", False)
-        row_class = 'class="top-candidate"' if is_top else ""
-        asr = c.get("allele_selectivity_ratio", 0)
-        acc = c.get("accessibility_score", 0.5)
-        ot = c.get("off_target_count", -1)
-        ot_str = str(ot) if ot >= 0 else "N/A"
-        sr = c.get("splice_risk", "?")
-        table_rows += f"""
-        <tr {row_class}>
-            <td>{rank}</td>
-            <td style="font-family:monospace;font-size:0.85em">{c.get('aso_seq','')}</td>
-            <td>{c.get('length','')}</td>
-            <td>{c.get('mRNA_start','')}-{c.get('mRNA_end','')}</td>
-            <td>{c.get('mutation_pos_in_aso','')}</td>
-            <td>{round(c.get('dG_mutant',0),2)}</td>
-            <td>{round(c.get('dG_wildtype',0),2)}</td>
-            <td style="font-weight:bold;color:{'#0d7a7a' if asr < -1.5 else ('#444' if asr < -1.0 else '#c0392b')}">{round(asr,3)}</td>
-            <td>{round(acc,3)}</td>
-            <td>{ot_str}</td>
-            <td style="color:{'#c0392b' if sr=='Y' else '#27ae60'}">{sr}</td>
-            <td style="font-size:0.8em">{c.get('recommended_gapmer_pattern','')}</td>
-        </tr>"""
+    rows_html = []
+    for rank, c in enumerate(candidates, 1):
+        asr = c.get("allele_selectivity_ratio", c.get("allele_selectivity_ratio_kcal_mol", ""))
+        acc = c.get("accessibility_score", "")
+        ot  = c.get("off_target_count", "")
+        comp = c.get("composite_score", "")
+        snp_pos  = c.get("snp_pos_in_aso", "")
+        snp_scr  = c.get("snp_pos_score", "")
+        snp_reg  = c.get("snp_region", "")
+        tox      = c.get("tox_summary", "")
+        seq      = c.get("aso_seq", c.get("ASO_sequence", ""))
+        aso_id   = c.get("ASO_ID", "")
+        length   = c.get("length", len(seq) if seq else "")
+        gapmer   = c.get("recommended_gapmer_pattern", "")
+        splice   = c.get("splice_risk", "")
 
-    # Build full HTML
-    html = f"""<!DOCTYPE html>
+        tox_class = ""
+        if tox and str(tox).startswith("FAIL"):
+            tox_class = "tox-fail"
+        elif tox and str(tox).startswith("WARN"):
+            tox_class = "tox-warn"
+
+        ot_str = str(ot) if ot not in ("", None, -1) else ("unscreened" if ot == -1 else "")
+        ot_class = "ot-hits" if (isinstance(ot, int) and ot > 0) else ""
+
+        top_style = ' class="top-row"' if rank <= 5 else ""
+
+        rows_html.append(f"""
+        <tr{top_style}>
+            <td class="center">{rank}</td>
+            <td><code>{esc(aso_id)}</code></td>
+            <td><code class="seq">{esc(seq)}</code></td>
+            <td class="center">{esc(length)}</td>
+            <td class="center num">{_fmt(asr)}</td>
+            <td class="center num">{_fmt(acc)}</td>
+            <td class="center num">{_fmt(comp)}</td>
+            <td class="center">{esc(snp_pos)}</td>
+            <td class="center">{_fmt(snp_scr)}</td>
+            <td class="center">{esc(snp_reg)}</td>
+            <td class="center {ot_class}">{esc(ot_str)}</td>
+            <td class="center">{esc(splice)}</td>
+            <td class="{tox_class}">{esc(tox)}</td>
+            <td class="small">{esc(gapmer)}</td>
+        </tr>""")
+
+    html_out = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AlleleSelect Report — {variant_label}</title>
-<script src="https://cdn.plot.ly/plotly-2.26.0.min.js"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AlleleSelect v2 — {esc(variant_label)}</title>
 <style>
-  body {{ font-family: 'Times New Roman', Times, serif; margin: 0; padding: 20px 40px;
-         background: #fafafa; color: #1a1a1a; line-height: 1.5; }}
-  h1 {{ font-size: 1.6em; border-bottom: 2px solid #0d7a7a; padding-bottom: 8px;
-       color: #0d7a7a; }}
-  h2 {{ font-size: 1.2em; color: #333; margin-top: 2em; }}
-  .meta {{ color: #666; font-size: 0.9em; margin-bottom: 2em; }}
-  .summary-grid {{ display: flex; gap: 20px; flex-wrap: wrap; margin: 1em 0 2em 0; }}
-  .summary-card {{ background: white; border: 1px solid #ddd; border-radius: 6px;
-                   padding: 14px 20px; min-width: 160px; text-align: center; }}
-  .summary-card .val {{ font-size: 2em; font-weight: bold; color: #0d7a7a; }}
-  .summary-card .lbl {{ font-size: 0.85em; color: #666; }}
-  table {{ border-collapse: collapse; width: 100%; font-size: 0.85em; margin: 1em 0; }}
-  th {{ background: #0d7a7a; color: white; padding: 8px 6px; text-align: left;
-        cursor: pointer; user-select: none; }}
-  td {{ padding: 6px 6px; border-bottom: 1px solid #eee; }}
-  tr:hover td {{ background: #f0f9f9; }}
-  tr.top-candidate td {{ background: #e6f7f7; }}
-  tr.top-candidate:hover td {{ background: #d0f0f0; }}
-  .plot-container {{ background: white; border: 1px solid #ddd; border-radius: 6px;
-                     padding: 10px; margin: 1em 0 2em 0; }}
-  .threshold-note {{ font-size: 0.85em; color: #555; margin: 0.5em 0; }}
-  footer {{ margin-top: 3em; font-size: 0.8em; color: #888; border-top: 1px solid #ddd; padding-top: 1em; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          margin: 0; padding: 20px; background: #f8f9fa; color: #2c2c2c; }}
+  h1   {{ color: #0d7a7a; font-size: 1.5rem; margin-bottom: 4px; }}
+  .sub {{ color: #666; font-size: 0.9rem; margin-bottom: 20px; }}
+  .badge {{ display: inline-block; background: #0d7a7a; color: white;
+            border-radius: 4px; padding: 2px 8px; font-size: 0.75rem;
+            margin-left: 8px; vertical-align: middle; }}
+  table {{ width: 100%; border-collapse: collapse; background: white;
+           box-shadow: 0 1px 4px rgba(0,0,0,.08); border-radius: 8px;
+           overflow: hidden; font-size: 0.82rem; }}
+  th    {{ background: #0d7a7a; color: white; padding: 8px 10px;
+           text-align: left; cursor: pointer; user-select: none; white-space: nowrap; }}
+  th:hover {{ background: #0b6868; }}
+  td    {{ padding: 6px 10px; border-bottom: 1px solid #eee; }}
+  tr:last-child td {{ border-bottom: none; }}
+  tr.top-row td {{ background: #e6f4f4; }}
+  tr:not(.top-row):hover td {{ background: #f5f5f5; }}
+  .center {{ text-align: center; }}
+  .num    {{ font-variant-numeric: tabular-nums; }}
+  .small  {{ font-size: 0.75rem; color: #555; }}
+  code    {{ font-family: 'Courier New', monospace; font-size: 0.8rem; }}
+  code.seq {{ color: #0d7a7a; font-size: 0.78rem; }}
+  .tox-fail {{ color: #c0392b; font-weight: bold; }}
+  .tox-warn {{ color: #e67e22; }}
+  .ot-hits  {{ color: #c0392b; }}
+  .summary  {{ display: flex; gap: 20px; margin-bottom: 20px; flex-wrap: wrap; }}
+  .card     {{ background: white; border-radius: 8px; padding: 14px 18px;
+               box-shadow: 0 1px 4px rgba(0,0,0,.08); min-width: 160px; }}
+  .card-val {{ font-size: 1.5rem; font-weight: bold; color: #0d7a7a; }}
+  .card-lab {{ font-size: 0.78rem; color: #888; margin-top: 2px; }}
+  .note     {{ font-size: 0.78rem; color: #888; margin-top: 12px; }}
 </style>
 </head>
 <body>
-<h1>AlleleSelect: {variant_label}</h1>
-<div class="meta">
-  Generated {now} | The Xiu Lab &mdash; <a href="https://thexiulab.org">thexiulab.org</a> |
-  <a href="https://github.com/axshoe/alleleselect">github.com/axshoe/alleleselect</a>
+<h1>AlleleSelect v2 <span class="badge">R192Q</span></h1>
+<div class="sub">{esc(variant_label)} | ENST00000360228.10 | thexiulab.org</div>
+
+<div class="summary">
+  <div class="card">
+    <div class="card-val">{len(candidates)}</div>
+    <div class="card-lab">Total candidates</div>
+  </div>
+  <div class="card">
+    <div class="card-val">{_fmt(top5[0].get('composite_score','') if top5 else '')}</div>
+    <div class="card-lab">Best composite score</div>
+  </div>
+  <div class="card">
+    <div class="card-val">{_fmt(top5[0].get('allele_selectivity_ratio', top5[0].get('allele_selectivity_ratio_kcal_mol','')) if top5 else '')}</div>
+    <div class="card-lab">Best ASR (kcal/mol)</div>
+  </div>
+  <div class="card">
+    <div class="card-val">{_fmt(sum(c.get('accessibility_score',0) for c in candidates)/len(candidates) if candidates else 0)}</div>
+    <div class="card-lab">Mean accessibility</div>
+  </div>
 </div>
 
-<div class="summary-grid">
-  <div class="summary-card"><div class="val">{len(candidates)}</div><div class="lbl">Total candidates</div></div>
-  <div class="summary-card"><div class="val">{sum(1 for c in candidates if c.get('allele_selectivity_ratio',0) < -1.0)}</div><div class="lbl">ASR &lt; -1.0</div></div>
-  <div class="summary-card"><div class="val">{sum(1 for c in candidates if c.get('top_candidate',False))}</div><div class="lbl">Top candidates</div></div>
-  <div class="summary-card"><div class="val">{sum(1 for c in candidates[:50] if c.get('off_target_count',1) == 0)}</div><div class="lbl">Zero off-targets (top 50)</div></div>
-</div>
-
-<h2>Priority Space: Allele Selectivity vs. mRNA Accessibility</h2>
-<p class="threshold-note">Optimal candidates (top-right, teal): high accessibility + strong allele selectivity + zero off-targets.</p>
-<div class="plot-container" id="scatter-plot" style="height:480px"></div>
-
-<h2>Top 20 Ranked Candidates</h2>
-<p class="threshold-note">Teal rows: top candidates (ASR &lt; -1.5 kcal/mol, mutation at optimal position).</p>
-<table id="candidates-table">
-  <thead><tr>
-    <th onclick="sortTable(0)">Rank</th>
-    <th>ASO Sequence (5'→3')</th>
-    <th onclick="sortTable(2)">Length</th>
-    <th>mRNA Position</th>
-    <th onclick="sortTable(4)">Mut Pos</th>
-    <th onclick="sortTable(5)">ΔG mut</th>
-    <th onclick="sortTable(6)">ΔG wt</th>
-    <th onclick="sortTable(7)">ASR</th>
-    <th onclick="sortTable(8)">Accessibility</th>
-    <th onclick="sortTable(9)">Off-targets</th>
-    <th>Splice Risk</th>
-    <th>Gapmer Pattern</th>
-  </tr></thead>
-  <tbody>{table_rows}</tbody>
+<table id="tbl">
+<thead>
+<tr>
+  <th onclick="sortTable(0)">Rank</th>
+  <th onclick="sortTable(1)">ASO ID</th>
+  <th onclick="sortTable(2)">Sequence (5'→3')</th>
+  <th onclick="sortTable(3)">Len</th>
+  <th onclick="sortTable(4)">ASR (kcal/mol)</th>
+  <th onclick="sortTable(5)">Accessibility</th>
+  <th onclick="sortTable(6)">Composite</th>
+  <th onclick="sortTable(7)">SNP@ASO</th>
+  <th onclick="sortTable(8)">Pos score</th>
+  <th onclick="sortTable(9)">Region</th>
+  <th onclick="sortTable(10)">Off-targets</th>
+  <th onclick="sortTable(11)">Splice</th>
+  <th onclick="sortTable(12)">Toxicity</th>
+  <th>Gapmer pattern</th>
+</tr>
+</thead>
+<tbody>
+{''.join(rows_html)}
+</tbody>
 </table>
 
+<div class="note">
+  Highlighted rows (ranks 1–5) = top composite-score candidates. Click column headers to sort.<br>
+  <b>ASR</b>: allele selectivity ratio = ΔG<sub>mutant</sub> − ΔG<sub>wildtype</sub> (more negative = better).<br>
+  <b>Composite</b> = 0.40×ASR_norm + 0.35×SNP_position_score + 0.25×accessibility.<br>
+  <b>SNP@ASO</b>: 1-indexed position of SNP within ASO from 5' end.<br>
+  <b>Off-targets</b>: BLASTn hits vs GENCODE v44; "unscreened" = not in top-50 pre-ranking.<br>
+  Pipeline v2 | Ostergaard 2013 position scoring | Hagedorn 2022 toxicity screening
+</div>
+
 <script>
-// Scatter plot
-const scatter = {json.dumps(scatter_data)};
-const teal = '#0d7a7a', orange = '#e67e22', red = '#c0392b', grey = '#999';
-
-const colors = scatter.map(d =>
-  d.off_target === 0 ? (d.top ? teal : '#1a8a8a') :
-  d.off_target === -1 ? grey :
-  d.off_target <= 2 ? orange : red
-);
-
-const sizes = scatter.map(d => d.top ? 14 : 8);
-
-const trace = {{
-  x: scatter.map(d => d.accessibility),
-  y: scatter.map(d => d.asr),
-  mode: 'markers',
-  type: 'scatter',
-  marker: {{ color: colors, size: sizes, opacity: 0.8,
-             line: {{ width: scatter.map(d => d.top ? 2 : 0.5), color: '#333' }} }},
-  text: scatter.map(d => `${{d.aso_id}}<br>Seq: ${{d.aso_seq}}<br>ASR: ${{d.asr}}<br>Access: ${{d.accessibility}}<br>Off-targets: ${{d.off_target}}`),
-  hoverinfo: 'text',
-}};
-
-const layout = {{
-  xaxis: {{ title: 'mRNA Accessibility Score (0–1)', range: [0, 1] }},
-  yaxis: {{ title: 'Allele Selectivity Ratio (kcal/mol)' }},
-  shapes: [
-    {{ type: 'line', x0: 0, x1: 1, y0: -1.0, y1: -1.0, line: {{ dash: 'dash', color: '#999', width: 1 }} }},
-    {{ type: 'line', x0: 0, x1: 1, y0: -1.5, y1: -1.5, line: {{ dash: 'dash', color: teal, width: 1.5 }} }},
-    {{ type: 'line', x0: 0.65, x1: 0.65, y0: -6, y1: 2, line: {{ dash: 'dot', color: '#aaa', width: 1 }} }},
-  ],
-  annotations: [
-    {{ x: 0.67, y: -1.55, text: 'Top candidate zone', showarrow: false,
-       font: {{ size: 11, color: teal }}, xanchor: 'left' }},
-    {{ x: 0.02, y: -1.05, text: 'ASR = -1.0 threshold', showarrow: false,
-       font: {{ size: 10, color: '#888' }}, xanchor: 'left' }},
-  ],
-  margin: {{ t: 20, r: 20, b: 50, l: 60 }},
-  paper_bgcolor: 'white', plot_bgcolor: '#fafafa',
-  font: {{ family: 'Times New Roman' }},
-}};
-
-Plotly.newPlot('scatter-plot', [trace], layout, {{responsive: true}});
-
-// Table sort
+let sortDir = {{}};
 function sortTable(col) {{
-  const table = document.getElementById('candidates-table');
-  const tbody = table.tBodies[0];
+  const tbl = document.getElementById('tbl');
+  const tbody = tbl.tBodies[0];
   const rows = Array.from(tbody.rows);
-  rows.sort((a, b) => {{
-    const va = parseFloat(a.cells[col].innerText) || a.cells[col].innerText;
-    const vb = parseFloat(b.cells[col].innerText) || b.cells[col].innerText;
-    return va < vb ? -1 : va > vb ? 1 : 0;
+  sortDir[col] = !sortDir[col];
+  rows.sort((a,b) => {{
+    let va = a.cells[col].innerText.trim();
+    let vb = b.cells[col].innerText.trim();
+    let na = parseFloat(va), nb = parseFloat(vb);
+    if (!isNaN(na) && !isNaN(nb)) return sortDir[col] ? na-nb : nb-na;
+    return sortDir[col] ? va.localeCompare(vb) : vb.localeCompare(va);
   }});
   rows.forEach(r => tbody.appendChild(r));
 }}
 </script>
-
-<footer>
-AlleleSelect v1.0.0 | The Xiu Lab | <a href="https://thexiulab.org">thexiulab.org</a> |
-<a href="https://github.com/axshoe/alleleselect">github.com/axshoe/alleleselect</a><br>
-This tool is for research use only. All candidates require experimental validation.
-Results should not be used for clinical decision-making.
-</footer>
 </body>
 </html>"""
 
-    os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"HTML report saved: {output_path}")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(html_out)
+    print(f"HTML report saved: {path}")

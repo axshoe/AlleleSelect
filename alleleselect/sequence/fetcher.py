@@ -95,7 +95,7 @@ def extract_window(sequence: str, center_pos: int, flank: int = 200) -> tuple:
 
 
 if __name__ == "__main__":
-    print("Fetching CACNA1A CDS from Ensembl...")
+    print("Fetching CDS from Ensembl...")
     cds = fetch_cds_sequence()
     print(f"CDS length: {len(cds)} nt")
     print(f"Bases 570-580 (around R192Q site): {cds[569:580]}")
