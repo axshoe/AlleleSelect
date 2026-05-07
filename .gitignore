@@ -28,3 +28,4 @@ alleleselect_output/
 my_*/
 .idea/
 *.ps
+/SETUP.md
