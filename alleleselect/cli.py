@@ -3,8 +3,11 @@ cli.py
 AlleleSelect command-line interface.
 
 Usage:
-    alleleselect --variant c.575G>A --transcript ENST00000360228.10 --output R192Q_candidates/
-    alleleselect --variant c.575G>A --output R192Q_candidates/ --no-blast --no-rnafold
+    alleleselect --variant c.575G>A --transcript ENST00000360228.10 --output demo/R192Q_output/
+    alleleselect --variant c.575G>A --output demo/R192Q_output/ --no-blast --no-rnafold
+
+    # Other genes (e.g. ATXN1 for SCA1):
+    alleleselect --variant c.689C>T --transcript ENST00000436975.6 --gene ATXN1 --no-splice-check --output atxn1_output/
 
 Run 'alleleselect --help' for full options.
 """
@@ -18,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alleleselect",
         description=(
-            "AlleleSelect: Allele-Selective ASO Design Pipeline for CACNA1A GoF Mutations.\n"
+            "AlleleSelect: Allele-Selective ASO Design Pipeline for Dominant Neurological Mutations.\n"
             "Xiu Lab | thexiulab.org | github.com/axshoe/alleleselect"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -32,6 +35,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--transcript", "-t",
         default="ENST00000360228",
         help="Ensembl transcript ID. Default: ENST00000360228 (CACNA1A canonical).",
+    )
+    parser.add_argument(
+        "--gene", "-g",
+        default=None,
+        help="Gene name for output labeling (e.g. CACNA1A, ATXN1). "
+             "Defaults to transcript ID if not provided.",
     )
     parser.add_argument(
         "--output", "-o",
@@ -68,6 +77,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip RNAfold accessibility scoring (use if ViennaRNA not installed).",
     )
     parser.add_argument(
+        "--no-splice-check",
+        action="store_true",
+        help="Skip splice site proximity check. Recommended for non-CACNA1A transcripts.",
+    )
+    parser.add_argument(
         "--top-n-blast",
         type=int,
         default=50,
@@ -87,12 +101,16 @@ def run(args) -> None:
     from alleleselect.scoring.allele_selectivity import generate_candidate_windows
     from alleleselect.scoring.accessibility import run_rnafold, compute_window_accessibility, check_rnafold_available
     from alleleselect.scoring.offtarget import run_blast_offtarget
-    from alleleselect.scoring.splice import flag_splice_risk, get_splice_positions_for_r192q
+    from alleleselect.scoring.splice import flag_splice_risk, get_splice_positions_for_r192q, get_splice_positions_for_transcript
     from alleleselect.modification.annotator import annotate_all_candidates
     from alleleselect.output.report import save_csv, save_html_report
+    from alleleselect.scoring.snp_position import score_snp_position, screen_toxic, composite_score
 
     os.makedirs(args.output, exist_ok=True)
     log = print if args.verbose else lambda *a, **k: None
+
+    # Resolve gene label for output
+    gene_label = args.gene if args.gene else args.transcript.split(".")[0]
 
     # 1. Parse HGVS variant
     print(f"[AlleleSelect] Parsing variant: {args.variant}")
@@ -122,26 +140,11 @@ def run(args) -> None:
     if not args.no_rnafold:
         print("[AlleleSelect] Running RNAfold accessibility scoring...")
         import tempfile as _tempfile
-        import os as _os
         from alleleselect.sequence.fetcher import extract_window
         window_seq, window_start = extract_window(wt_cds, parsed["position"], flank=200)
 
-        # Explicit work_dir so we can diagnose what files RNAfold actually writes
-        rnafold_work_dir = _tempfile.mkdtemp(prefix="alleleselect_rnafold_diag_")
-        print(f"  [diag] RNAfold work_dir: {rnafold_work_dir}")
-        print(f"  [diag] window_seq length: {len(window_seq)} nt")
-
+        rnafold_work_dir = _tempfile.mkdtemp(prefix="alleleselect_rnafold_")
         rnafold_result = run_rnafold(window_seq, work_dir=rnafold_work_dir)
-
-        try:
-            files_in_workdir = _os.listdir(rnafold_work_dir)
-        except Exception:
-            files_in_workdir = ["(could not list)"]
-        print(f"  [diag] files in work_dir after RNAfold: {files_in_workdir}")
-        print(f"  [diag] bp_matrix size: {len(rnafold_result['bp_matrix'])} pairs")
-        if rnafold_result['per_base_unpaired']:
-            sample = rnafold_result['per_base_unpaired'][:5]
-            print(f"  [diag] first 5 accessibility values: {[round(v,3) for v in sample]}")
 
         for c in candidates:
             acc = compute_window_accessibility(
@@ -169,40 +172,82 @@ def run(args) -> None:
 
     # 6. Splice site flagging
     print("[AlleleSelect] Flagging splice site proximity...")
-    splice_positions = get_splice_positions_for_r192q()
+    if args.no_splice_check:
+        splice_positions = []
+        log("  Splice check disabled (--no-splice-check).")
+    elif args.transcript.startswith("ENST00000360228") and args.gene in (None, "CACNA1A"):
+        splice_positions = get_splice_positions_for_r192q()
+    else:
+        splice_positions = get_splice_positions_for_transcript(
+            transcript_id=args.transcript,
+            mutation_pos=parsed["position"],
+            flank=args.flank,
+        )
     candidates = flag_splice_risk(candidates, splice_positions)
 
     # 7. Gapmer modification annotation
     print("[AlleleSelect] Annotating gapmer modification patterns...")
     candidates = annotate_all_candidates(candidates)
 
-    # 8. Re-rank after all scoring
-    # Priority: top_candidate AND accessibility > 0.65 AND off_target = 0
-    def priority_key(c):
-        asr = c.get("allele_selectivity_ratio", 0)
-        acc = c.get("accessibility_score", 0)
-        ot_penalty = 100 if c.get("off_target_count", -1) > 0 else 0
-        sr_penalty = 50 if c.get("splice_risk") == "Y" else 0
-        return asr - (acc * 0.5) + ot_penalty + sr_penalty
+    # 7b. SNP position scoring + toxic sequence screening (v2)
+    print("[AlleleSelect] Scoring SNP position and screening toxic sequences (v2)...")
+    SNP_CDS_POS = parsed["position"]
+    WING_LEN = 5
 
-    candidates.sort(key=priority_key)
+    for c in candidates:
+        aso_seq   = c.get("aso_seq", "")
+        win_start = c.get("mRNA_start", 0)
+        aso_len   = len(aso_seq)
+
+        pos_result = score_snp_position(
+            aso_len      = aso_len,
+            window_start = win_start,
+            snp_cds_pos  = SNP_CDS_POS,
+            wing_len     = WING_LEN,
+        )
+        c["snp_pos_in_aso"] = pos_result["snp_pos_in_aso"]
+        c["snp_pos_score"]  = pos_result["snp_pos_score"]
+        c["snp_region"]     = pos_result["snp_region"]
+
+        tox_result = screen_toxic(aso_seq)
+        c["tox_summary"] = tox_result["summary"]
+        c["tox_serious"] = tox_result["serious"]
+        c["tox_warning"] = tox_result["warning"]
+        c["tox_flags"]   = "; ".join(
+            f"{f['motif']}: {f['reason']}" for f in tox_result["flags"]
+        ) if tox_result["flags"] else ""
+
+        asr = c.get("allele_selectivity_ratio", 0.0)
+        acc = c.get("accessibility_score", 0.5)
+        c["composite_score"] = composite_score(
+            asr           = asr,
+            accessibility = acc,
+            snp_pos_score = c["snp_pos_score"],
+            tox_serious   = c["tox_serious"],
+        )
+
+    # 8. Re-rank by composite score
+    candidates.sort(key=lambda c: -c.get("composite_score", 0.0))
 
     # 9. Save outputs
-    variant_label = f"CACNA1A {args.variant}"
-    csv_path = os.path.join(args.output, "candidates.csv")
+    variant_label = f"{gene_label} {args.variant}"
+    csv_path  = os.path.join(args.output, "candidates.csv")
     html_path = os.path.join(args.output, "report.html")
 
     save_csv(candidates, csv_path)
     save_html_report(candidates, variant_label, html_path)
 
-    # Print top 5 summary
     print(f"\n[AlleleSelect] Complete. Outputs in: {args.output}/")
-    print(f"  Top 5 candidates:")
+    print(f"  Top 5 candidates (ranked by composite score):")
     for i, c in enumerate(candidates[:5], 1):
         print(
             f"  {i}. {c.get('ASO_ID','?')} | {c.get('aso_seq','')} | "
+            f"Composite={c.get('composite_score',0):.4f} | "
             f"ASR={c.get('allele_selectivity_ratio',0):.3f} | "
-            f"Access={c.get('accessibility_score',0):.2f} | "
+            f"SNPpos={c.get('snp_pos_in_aso','?')}({c.get('snp_region','?')}) | "
+            f"PosScore={c.get('snp_pos_score',0):.3f} | "
+            f"Access={c.get('accessibility_score',0):.3f} | "
+            f"Tox={c.get('tox_summary','?')} | "
             f"OT={c.get('off_target_count',-1)} | "
             f"Splice={c.get('splice_risk','?')}"
         )
