@@ -44,6 +44,19 @@ CSV_FIELDS = [
     "tox_serious",
     "tox_warning",
     "tox_flags",
+    # --- v4 columns ---
+    "wt_accessibility",
+    "mut_accessibility",
+    "diff_accessibility",
+    "min_off_target_mismatches",
+    "nearest_off_target_gene",
+    "ot_risk_level",
+    "mod_primary",
+    "mod_primary_pos",
+    "mod_recommendation",
+    "engineered_mismatch",
+    "extra_mismatch_pos",
+    "extra_mismatch_base",
 ]
 
 # Map from internal candidate dict keys → CSV column names

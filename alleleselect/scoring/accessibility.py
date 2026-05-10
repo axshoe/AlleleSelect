@@ -1,43 +1,38 @@
 """
 accessibility.py
-mRNA secondary structure accessibility scoring using RNAfold (Vienna RNA package).
+RNAfold-based mRNA accessibility scoring for ASO candidate windows.
 
-RNAfold reference:
-    Lorenz, R., et al. (2011). ViennaRNA Package 2.0. Algorithms Mol Biol 6(1):26.
-    Free download: https://www.tbi.univie.ac.at/RNA/
-
-Complete bug history:
-  Bug 1: --noPS suppressed _dp.ps entirely. Removed.
-  Bug 2: --id-prefix=target implies --auto-id which overrides the FASTA header and
-         produces "target_0001_dp.ps", not "target_dp.ps". Removed that flag.
-  Bug 3: Passing a file argument causes RNAfold on Windows to name output after the
-         input *file* stem. Fixed by piping via stdin.
-
-Definitive behaviour per RNAfold docs:
-  - Plain text input (no FASTA header) -> output: dot.ps / rna.ps
-  - FASTA input with ">myseq" header   -> output: myseq_dp.ps  (in cwd)
-  - --id-prefix=X implies --auto-id, overrides FASTA header, produces X_0001_dp.ps
-
-Correct approach: pipe ">target\n<seq>\n" via stdin, no --id-prefix, no --noPS.
-Output will be target_dp.ps in work_dir. Full directory scan as fallback.
+v4 addition: compute_differential_accessibility()
+  Runs RNAfold on BOTH the wildtype and mutant CDS sequences.
+  Computes per-candidate: mut_accessibility - wt_accessibility.
+  A positive differential means the mutant mRNA is MORE single-stranded
+  at the ASO binding window, which correlates with better allele selectivity.
+  Motivated by Aguti & Zhou 2024 (PMID 38993932).
 """
 
-import subprocess
 import os
 import re
+import subprocess
 import tempfile
 import warnings
+from typing import Optional
+
+
+def _neutral_result(n: int) -> dict:
+    """Return a neutral (uniform 0.5 accessibility) RNAfold result for n bases."""
+    return {
+        "n":                 n,
+        "mfe_structure":     "." * n,
+        "mfe":               0.0,
+        "per_base_unpaired": [0.5] * n,
+    }
 
 
 def check_rnafold_available() -> bool:
-    """Return True if RNAfold is on PATH, False otherwise."""
     try:
-        result = subprocess.run(
-            ["RNAfold", "--version"],
-            capture_output=True, text=True, timeout=5
-        )
-        return result.returncode == 0
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        subprocess.run(["RNAfold", "--version"], capture_output=True, check=True)
+        return True
+    except (FileNotFoundError, subprocess.CalledProcessError):
         return False
 
 
@@ -50,162 +45,133 @@ def run_rnafold(sequence: str, work_dir: str = None) -> dict:
     sequence : str
         RNA/DNA sequence (T will be converted to U).
     work_dir : str or None
-        Directory where RNAfold writes output files. Uses tempdir if None.
+        Directory for output files. Uses tempdir if None.
 
     Returns
     -------
-    dict with keys: mfe_structure, mfe, bp_matrix, per_base_unpaired, n
+    dict with keys:
+        mfe_structure      (str)
+        mfe                (float)
+        per_base_unpaired  (list of float, 1-indexed, length = len(sequence))
     """
     seq_rna = sequence.upper().replace("T", "U")
-    n = len(seq_rna)
+    n       = len(seq_rna)
 
     if work_dir is None:
         work_dir = tempfile.mkdtemp(prefix="alleleselect_rnafold_")
 
-    # Pipe FASTA via stdin. Key rules from official docs:
-    # - FASTA header ">target" -> output file is "target_dp.ps" in cwd
-    # - Do NOT use --id-prefix: it implies --auto-id which overrides the FASTA
-    #   header and produces "target_0001_dp.ps" instead
-    # - Do NOT use --noPS: suppresses all PostScript output including _dp.ps
-    # - Piping via stdin (not file argument) avoids Windows path-stem naming
-    fasta_input = f">target\n{seq_rna}\n"
-
-    cmd = [
-        "RNAfold",
-        "-p",   # partition function + base-pair probability matrix (_dp.ps)
-                # no --noPS, no --id-prefix
-    ]
+    # Write to a named FASTA file. When RNAfold reads from a file with sequence
+    # named "query", it creates "query_dp.ps" in the same directory reliably
+    # across all platforms. Reading from stdin produces unpredictable filenames
+    # on Windows (may be "dot.ps", "stdin_dp.ps", or written to process CWD).
+    input_fasta = os.path.join(work_dir, "query.fa")
+    with open(input_fasta, "w") as f:
+        f.write(f">query\n{seq_rna}\n")
 
     try:
         result = subprocess.run(
-            cmd,
-            input=fasta_input,
+            ["RNAfold", "-p", input_fasta],
             capture_output=True,
             text=True,
             timeout=120,
-            cwd=work_dir,   # RNAfold writes target_dp.ps here
+            cwd=work_dir,
         )
-    except FileNotFoundError:
-        warnings.warn(
-            "RNAfold not found. Install ViennaRNA: https://www.tbi.univie.ac.at/RNA/\n"
-            "Accessibility scores will be 0.5 (neutral) for all windows."
-        )
-        return _neutral_result(n)
     except subprocess.TimeoutExpired:
-        warnings.warn("RNAfold timed out. Using neutral accessibility scores.")
-        return _neutral_result(n)
-
-    if result.returncode != 0:
-        warnings.warn(
-            f"RNAfold error (returncode {result.returncode}):\n{result.stderr[:500]}"
-        )
-        return _neutral_result(n)
-
-    # Parse MFE structure and energy from stdout
-    mfe_structure = ""
-    mfe = 0.0
-    for line in result.stdout.strip().split("\n"):
-        m = re.match(r"^([.()\[\]{}|,]+)\s+\(\s*(-?\d+\.\d+)\)", line)
-        if m:
-            mfe_structure = m.group(1)
-            mfe = float(m.group(2))
-            break
-
-    # Locate the dot-plot file.
-    # Priority: target_dp.ps (expected), then scan directory for any *_dp.ps.
-    # dot.ps is the fallback for old-style plain-text input (no FASTA header).
-    candidate_dp_files = [
-        os.path.join(work_dir, "target_dp.ps"),
-        os.path.join(work_dir, "dot.ps"),
-    ]
-    try:
-        for fname in sorted(os.listdir(work_dir)):
-            full = os.path.join(work_dir, fname)
-            if fname.endswith("_dp.ps") and full not in candidate_dp_files:
-                candidate_dp_files.append(full)
-    except OSError:
-        pass
-
-    bp_matrix = {}
-    found_file = None
-    for dp_file in candidate_dp_files:
-        if os.path.exists(dp_file):
-            bp_matrix = _parse_dp_file(dp_file)
-            if bp_matrix:
-                found_file = dp_file
-                break
-
-    if not bp_matrix:
-        warnings.warn(
-            "RNAfold completed but no usable _dp.ps was found.\n"
-            "Accessibility scores will be 0.5 (neutral) for all windows.\n"
-            f"  work_dir : {work_dir}\n"
-            f"  files    : {os.listdir(work_dir)}\n"
-            "If a *_dp.ps file appears above, open it and check it contains\n"
-            "lines of the form: <int> <int> <float> ubox"
-        )
+        warnings.warn("RNAfold timed out. Returning uniform accessibility = 0.5.")
         return {
-            "mfe_structure": mfe_structure,
-            "mfe": mfe,
-            "bp_matrix": {},
+            "mfe_structure":     "." * n,
+            "mfe":               0.0,
             "per_base_unpaired": [0.5] * n,
-            "n": n,
         }
 
-    # Compute per-base unpaired probability.
-    # RNAfold dp.ps stores sqrt(P(i,j)) in ubox entries; square to get true prob.
-    # P_unpaired(i) = 1 - sum_j P(i,j)
-    per_base_paired = [0.0] * (n + 1)   # 1-indexed; [0] unused
-    for (i, j), sqrt_prob in bp_matrix.items():
-        prob = sqrt_prob ** 2
-        if 1 <= i <= n:
-            per_base_paired[i] += prob
-        if 1 <= j <= n:
-            per_base_paired[j] += prob
+    # Parse MFE from stdout: ">query\nSEQUENCE\nSTRUCTURE (MFE)"
+    mfe         = 0.0
+    mfe_struct  = "." * n
+    for line in result.stdout.splitlines():
+        m = re.match(r"^([.()\[\]{}]+)\s+\(\s*(-?\d+\.\d+)\s*\)", line)
+        if m:
+            mfe_struct = m.group(1)
+            mfe        = float(m.group(2))
+            break
 
-    per_base_unpaired = [
-        max(0.0, min(1.0, 1.0 - per_base_paired[i]))
-        for i in range(1, n + 1)
-    ]
+    # Parse base-pair probabilities from _dp.ps file
+    per_base_unpaired = _parse_dp_ps(work_dir, n)
 
     return {
-        "mfe_structure": mfe_structure,
-        "mfe": mfe,
-        "bp_matrix": bp_matrix,
+        "mfe_structure":     mfe_struct,
+        "mfe":               mfe,
         "per_base_unpaired": per_base_unpaired,
-        "n": n,
     }
 
 
-def _parse_dp_file(dp_path: str) -> dict:
+def _parse_dp_ps(work_dir: str, n: int) -> list:
     """
-    Parse RNAfold _dp.ps PostScript file.
-    Returns {(i, j): sqrt_probability} for all ubox entries where i < j.
+    Parse RNAfold dot-plot PostScript file for base-pair probabilities.
+    Returns per-position unpaired probabilities (1 = fully single-stranded).
     """
-    bp_matrix = {}
-    pattern = re.compile(r"(\d+)\s+(\d+)\s+([\d.e+\-]+)\s+ubox")
+    # Find the _dp.ps file — now always "query_dp.ps" since we write ">query" FASTA
+    # Keep fallbacks for backward compatibility with any cached temp dirs
+    dp_candidates = [
+        os.path.join(work_dir, "query_dp.ps"),   # primary: our named FASTA approach
+        os.path.join(work_dir, "stdin_dp.ps"),
+        os.path.join(work_dir, "input_dp.ps"),
+        os.path.join(work_dir, "dot.ps"),         # some ViennaRNA versions use this
+        os.path.join(work_dir, "sequence_dp.ps"),
+    ]
+    dp_file = None
+    for f in dp_candidates:
+        if os.path.exists(f):
+            dp_file = f
+            break
+
+    if dp_file is None:
+        # Search the work_dir for any *_dp.ps file
+        try:
+            for fname in os.listdir(work_dir):
+                if fname.endswith("_dp.ps"):
+                    dp_file = os.path.join(work_dir, fname)
+                    break
+        except OSError:
+            pass
+
+    if dp_file is None:
+        # List what's actually in work_dir to help diagnose
+        try:
+            found = os.listdir(work_dir)
+            warnings.warn(
+                f"RNAfold _dp.ps not found in {work_dir}. "
+                f"Files present: {found}. "
+                "Returning uniform accessibility = 0.5."
+            )
+        except OSError:
+            warnings.warn("RNAfold _dp.ps not found. Returning uniform accessibility = 0.5.")
+        return [0.5] * n
+
+    # ubox entries: i j sqrt(prob) ubox
+    paired_prob = {}  # position (1-based) -> sum of paired probabilities
     try:
-        with open(dp_path, "r", errors="replace") as f:
+        with open(dp_file) as f:
             for line in f:
-                m = pattern.search(line)
-                if m:
-                    i, j, sq = int(m.group(1)), int(m.group(2)), float(m.group(3))
-                    if i < j:
-                        bp_matrix[(i, j)] = sq
-    except Exception as e:
-        warnings.warn(f"Could not parse {dp_path}: {e}")
-    return bp_matrix
+                parts = line.strip().split()
+                if len(parts) == 4 and parts[3] == "ubox":
+                    try:
+                        i = int(parts[0])
+                        j = int(parts[1])
+                        sq_prob = float(parts[2])
+                        prob = sq_prob ** 2
+                        paired_prob[i] = paired_prob.get(i, 0.0) + prob
+                        paired_prob[j] = paired_prob.get(j, 0.0) + prob
+                    except (ValueError, IndexError):
+                        continue
+    except OSError:
+        return [0.5] * n
 
+    per_base = []
+    for i in range(1, n + 1):
+        unpaired = max(0.0, min(1.0, 1.0 - paired_prob.get(i, 0.0)))
+        per_base.append(unpaired)
 
-def _neutral_result(n: int) -> dict:
-    """Fallback when RNAfold is unavailable: all positions 0.5 (neutral)."""
-    return {
-        "mfe_structure": "." * n,
-        "mfe": 0.0,
-        "bp_matrix": {},
-        "per_base_unpaired": [0.5] * n,
-        "n": n,
-    }
+    return per_base
 
 
 def compute_window_accessibility(
@@ -215,41 +181,118 @@ def compute_window_accessibility(
     cds_start_in_sequence: int = 0,
 ) -> float:
     """
-    Mean unpaired probability across an ASO candidate window.
+    Compute mean accessibility for a CDS window in the broader sequence context.
 
     Parameters
     ----------
-    per_base_unpaired : 0-indexed list from run_rnafold
-    window_start : 1-based CDS position of window start
-    window_end   : 1-based CDS position of window end
-    cds_start_in_sequence : 0-based offset of CDS start inside the RNAfold sequence
-        e.g. if RNAfold ran on a ±200 nt window starting at CDS pos 375,
-        this is 374 (= 375 - 1).
+    per_base_unpaired    : list of float (from run_rnafold, 1-indexed)
+    window_start         : int, 1-based CDS start of window
+    window_end           : int, 1-based CDS end of window
+    cds_start_in_sequence: int, 0-based offset of CDS start within the RNAfold input sequence
+
+    Returns
+    -------
+    float: mean accessibility [0, 1]
     """
     seq_start = window_start + cds_start_in_sequence
     seq_end   = window_end   + cds_start_in_sequence
-    values = [
-        per_base_unpaired[pos - 1]
-        for pos in range(seq_start, seq_end + 1)
-        if 0 <= pos - 1 < len(per_base_unpaired)
-    ]
-    return sum(values) / len(values) if values else 0.5
+
+    seq_start = max(1, seq_start)
+    seq_end   = min(len(per_base_unpaired), seq_end)
+
+    if seq_start > seq_end:
+        return 0.5
+
+    vals = per_base_unpaired[seq_start - 1: seq_end]
+    return round(sum(vals) / len(vals), 3) if vals else 0.5
 
 
-if __name__ == "__main__":
-    if check_rnafold_available():
-        test_seq = "AAGACCGAGAGCAAGAAGGAGCGGCACGGCATGGCCATG"
-        wd = tempfile.mkdtemp(prefix="alleleselect_test_")
-        r = run_rnafold(test_seq, work_dir=wd)
-        print(f"Length      : {r['n']}")
-        print(f"MFE struct  : {r['mfe_structure']}")
-        print(f"MFE energy  : {r['mfe']} kcal/mol")
-        print(f"BP pairs    : {len(r['bp_matrix'])}")
-        mean_acc = sum(r['per_base_unpaired']) / len(r['per_base_unpaired'])
-        print(f"Mean access : {mean_acc:.3f}")
-        if not r["bp_matrix"]:
-            print(f"WARNING: bp_matrix is empty. Check {wd} for files.")
-        else:
-            print("Accessibility scoring is working correctly.")
-    else:
-        print("RNAfold not found. Install from https://www.tbi.univie.ac.at/RNA/")
+def compute_differential_accessibility(
+    wt_cds: str,
+    mut_cds: str,
+    mutation_pos: int,
+    candidates: list,
+    flank: int = 200,
+    work_dir: Optional[str] = None,
+) -> list:
+    """
+    Compute differential mRNA accessibility: mutant - wildtype at each candidate window.
+
+    Motivated by Aguti & Zhou 2024 (PMID 38993932), which showed that secondary
+    structure differences between mutant and wildtype mRNA at the mutation site
+    contribute to allele selectivity. Candidates where the mutant is MORE
+    single-stranded than wildtype (positive differential) are preferred.
+
+    A positive diff_accessibility means the mutant mRNA is more open to ASO binding,
+    while the wildtype may be more structured and harder to bind. This independently
+    contributes to allele selectivity beyond thermodynamics alone.
+
+    Parameters
+    ----------
+    wt_cds      : str, wildtype CDS
+    mut_cds     : str, mutant CDS
+    mutation_pos: int, 1-based CDS position of the mutation
+    candidates  : list of candidate dicts (with mRNA_start, mRNA_end)
+    flank       : int, window around mutation for RNAfold (default 200 nt)
+    work_dir    : str or None
+
+    Returns
+    -------
+    candidates list with 'diff_accessibility' field added to each candidate.
+    Positive = mutant more accessible. Zero if RNAfold unavailable.
+    """
+    if not check_rnafold_available():
+        warnings.warn(
+            "RNAfold not available. diff_accessibility will be 0.0 for all candidates."
+        )
+        for c in candidates:
+            c["wt_accessibility"]   = c.get("accessibility_score", 0.5)
+            c["mut_accessibility"]  = c.get("accessibility_score", 0.5)
+            c["diff_accessibility"] = 0.0
+        return candidates
+
+    if work_dir is None:
+        work_dir = tempfile.mkdtemp(prefix="alleleselect_diff_")
+
+    wt_dir  = os.path.join(work_dir, "wt")
+    mut_dir = os.path.join(work_dir, "mut")
+    os.makedirs(wt_dir,  exist_ok=True)
+    os.makedirs(mut_dir, exist_ok=True)
+
+    # Extract sequence window around mutation
+    pos0 = mutation_pos - 1
+    start = max(0, pos0 - flank)
+    end   = min(len(wt_cds), pos0 + flank + 1)
+
+    wt_window  = wt_cds[start:end]
+    mut_window = mut_cds[start:end]
+    window_cds_start = start + 1  # 1-based CDS start of window
+
+    print("[AlleleSelect] Running differential accessibility (WT vs mutant RNAfold)...")
+    wt_result  = run_rnafold(wt_window,  work_dir=wt_dir)
+    mut_result = run_rnafold(mut_window, work_dir=mut_dir)
+
+    wt_unpaired  = wt_result["per_base_unpaired"]
+    mut_unpaired = mut_result["per_base_unpaired"]
+
+    cds_offset = -(window_cds_start - 1)  # for compute_window_accessibility
+
+    for c in candidates:
+        wt_acc  = compute_window_accessibility(
+            wt_unpaired, c["mRNA_start"], c["mRNA_end"],
+            cds_start_in_sequence=cds_offset
+        )
+        mut_acc = compute_window_accessibility(
+            mut_unpaired, c["mRNA_start"], c["mRNA_end"],
+            cds_start_in_sequence=cds_offset
+        )
+        c["wt_accessibility"]   = wt_acc
+        c["mut_accessibility"]  = mut_acc
+        c["diff_accessibility"] = round(mut_acc - wt_acc, 3)
+
+    n_pos = sum(1 for c in candidates if c.get("diff_accessibility", 0) > 0)
+    print(f"  Differential accessibility complete. "
+          f"{n_pos}/{len(candidates)} candidates have positive differential "
+          f"(mutant more accessible than wildtype).")
+
+    return candidates
