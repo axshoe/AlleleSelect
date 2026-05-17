@@ -46,10 +46,16 @@ def score_snp_position(
     gap_center = (gap_start + gap_end) / 2
 
     if snp_0idx < gap_start or snp_0idx > gap_end:
+        # v5: Wing-position SNPs are no longer zeroed out.
+        # Aguti (UCL, 2026 call) and Elgersma (Erasmus MC, PMID 32092825) independently
+        # confirmed that the most selective ASO for a target can sometimes be in the wings.
+        # Requirement: at least 4 consecutive DNA nucleotides must remain in the gap.
+        # We keep these candidates with a low score (0.10) and flag them for experimental
+        # validation rather than excluding them entirely.
         return {
             "snp_pos_in_aso": snp_0idx + 1,
-            "snp_pos_score":  0.0,
-            "snp_region":     "wing",
+            "snp_pos_score":  0.10,
+            "snp_region":     "wing_caution",
         }
 
     dist  = abs(snp_0idx - gap_center)

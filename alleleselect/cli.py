@@ -200,7 +200,7 @@ def run(args) -> None:
     candidates = annotate_all_candidates(candidates)
 
     # 7b. SNP position scoring + toxicity + composite (v2/v4)
-    print("[AlleleSelect] Scoring SNP position and screening toxic sequences (v4)...")
+    print("[AlleleSelect] Scoring SNP position and screening toxic sequences (v5)...")
     SNP_CDS_POS = parsed["position"]
     WING_LEN    = 5
 
