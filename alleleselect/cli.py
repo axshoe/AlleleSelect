@@ -1,6 +1,12 @@
 """
 cli.py
-AlleleSelect command-line interface — v5
+AlleleSelect command-line interface — v6
+
+New in v6:
+  --fixed-length INT    Generate only ASOs of this exact length (e.g. 20 for 5-10-5 screens)
+  --gapmer-architecture Filter output to specific wing-gap-wing architecture (e.g. 5-10-5)
+  Motivated by Scholten (LUMC/SCA1): wet-lab screens use fixed 20-mer 5-10-5 format;
+  tool must match that format for direct computational vs. experimental comparison.
 
 New in v5:
   --junction-mode       Junction/exon-skipping ASO design mode (Aguti & Zhou 2024)
@@ -21,11 +27,11 @@ Usage:
     # Standard SNP mode (CACNA1A R192Q):
     alleleselect --variant c.575G>A --transcript ENST00000360228.10 --output demo/R192Q_output/
 
+    # Fixed 20-mer 5-10-5 run (for Scholten / ATXN1 SCA1 screen comparison):
+    alleleselect --variant c.XXXN>Y --transcript ENST00000436367.6 --gene ATXN1 --no-splice-check --fixed-length 20 --gapmer-architecture 5-10-5 --output atxn1_20mer/
+
     # Junction mode (COL6A3 exon 16 skipping):
     alleleselect --junction-mode --gene COL6A3 --wt-transcript ENST00000295550.9 --exon-skip 16 --output demo/COL6A3_junction/
-
-    # Junction mode with manual FASTA files:
-    alleleselect --junction-mode --gene COL6A3 --mut-fasta mut_junction.fa --wt-fasta wt_region.fa --junction-center 50 --output demo/COL6A3_junction/
 """
 
 import argparse
@@ -37,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alleleselect",
         description=(
-            "AlleleSelect v4: Allele-Selective ASO Design Pipeline for Dominant Neurological Mutations.\n"
+            "AlleleSelect v6: Allele-Selective ASO Design Pipeline for Dominant Neurological Mutations.\n"
             "Xiu Lab | thexiulab.org | github.com/axshoe/alleleselect"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -64,6 +70,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip splice site proximity check. Recommended for non-CACNA1A transcripts.")
     parser.add_argument("--top-n-blast", type=int, default=50,
         help="Number of top candidates to BLAST. Default: 50.")
+    # ── v6: fixed length and architecture filter ──────────────────────────────
+    parser.add_argument("--fixed-length", type=int, default=None,
+        help=(
+            "Generate only ASOs of this exact length (e.g. 20). "
+            "Overrides --aso-lengths. Use when your wet-lab screen uses a fixed ASO length "
+            "so computational and experimental results are directly comparable. "
+            "Scholten (LUMC/SCA1) screens 20-mer 5-10-5 gapmers exclusively."
+        ))
+    parser.add_argument("--gapmer-architecture", default=None,
+        help=(
+            "Filter output to a specific gapmer architecture. "
+            "Format: WING-GAP-WING (e.g. '5-10-5' for 5 MOE wing + 10 DNA gap + 5 MOE wing). "
+            "Candidates not matching this architecture are excluded. "
+            "Use with --fixed-length for direct wet-lab screen comparison."
+        ))
     # ── v5: junction mode ─────────────────────────────────────────────────────
     parser.add_argument("--junction-mode", action="store_true",
         help=(
@@ -141,6 +162,11 @@ def run(args) -> None:
     log = print if args.verbose else lambda *a, **k: None
 
     gene_label = args.gene if args.gene else args.transcript.split(".")[0]
+
+    # v6: fixed length override (for wet-lab screen comparison)
+    if args.fixed_length:
+        args.aso_lengths = [args.fixed_length]
+        print(f"[AlleleSelect] Fixed length mode: generating only {args.fixed_length}-mer candidates.")
 
     # 1. Parse HGVS variant
     print(f"[AlleleSelect] Parsing variant: {args.variant}")
@@ -230,6 +256,34 @@ def run(args) -> None:
     # 7. Gapmer modification annotation
     print("[AlleleSelect] Annotating gapmer modification patterns...")
     candidates = annotate_all_candidates(candidates)
+
+    # 7a. Architecture filter (v6) — must come after annotator which sets wing/gap lengths
+    if args.gapmer_architecture:
+        try:
+            parts = [int(x) for x in args.gapmer_architecture.split("-")]
+            if len(parts) != 3:
+                raise ValueError
+            target_wing, target_gap, target_wing2 = parts
+            before = len(candidates)
+            candidates = [
+                c for c in candidates
+                if c.get("wing_len") == target_wing and c.get("gap_len") == target_gap
+            ]
+            print(
+                f"[AlleleSelect] Architecture filter ({args.gapmer_architecture}): "
+                f"{len(candidates)} of {before} candidates retained."
+            )
+            if not candidates:
+                print(
+                    f"  WARNING: no candidates match {args.gapmer_architecture}. "
+                    f"Check that --fixed-length matches the architecture "
+                    f"(e.g. --fixed-length 20 --gapmer-architecture 5-10-5 requires length=20)."
+                )
+        except ValueError:
+            print(
+                f"  WARNING: --gapmer-architecture '{args.gapmer_architecture}' not in "
+                f"WING-GAP-WING format (e.g. 5-10-5). Filter skipped."
+            )
 
     # 7b. SNP position scoring + toxicity + composite (v2/v4)
     print("[AlleleSelect] Scoring SNP position and screening toxic sequences (v4)...")
