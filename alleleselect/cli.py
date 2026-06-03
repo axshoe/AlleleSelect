@@ -1,12 +1,17 @@
 """
 cli.py
-AlleleSelect command-line interface — v6
+AlleleSelect command-line interface — v7
 
-New in v6:
-  --fixed-length INT    Generate only ASOs of this exact length (e.g. 20 for 5-10-5 screens)
-  --gapmer-architecture Filter output to specific wing-gap-wing architecture (e.g. 5-10-5)
-  Motivated by Scholten (LUMC/SCA1): wet-lab screens use fixed 20-mer 5-10-5 format;
-  tool must match that format for direct computational vs. experimental comparison.
+New in v7:
+  --rna-params sugimoto|santalucia
+                        Thermodynamic parameter set. Default: sugimoto (Sugimoto 1995
+                        RNA:DNA hybrid, PMID 7545436). Most accurate for MOE PS gapmer
+                        binding to RNA target. Recommended by Frank Bennett (Ionis).
+                        'santalucia' retains legacy v1-v6 DNA:DNA behavior.
+  --premrna-blast       Include intronic pre-mRNA sequences in off-target BLAST.
+                        RNase H ASOs act in the nucleus and can bind pre-mRNA.
+                        Requires ALLELESELECT_GENOME_FASTA env variable.
+                        Motivated by Stefan Hauser (DZNE Tubingen).
 
 New in v5:
   --junction-mode       Junction/exon-skipping ASO design mode (Aguti & Zhou 2024)
@@ -43,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alleleselect",
         description=(
-            "AlleleSelect v6: Allele-Selective ASO Design Pipeline for Dominant Neurological Mutations.\n"
+            "AlleleSelect v7: Allele-Selective ASO Design Pipeline for Dominant Neurological Mutations.\n"
             "Xiu Lab | thexiulab.org | github.com/axshoe/alleleselect"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -70,7 +75,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip splice site proximity check. Recommended for non-CACNA1A transcripts.")
     parser.add_argument("--top-n-blast", type=int, default=50,
         help="Number of top candidates to BLAST. Default: 50.")
-    # ── v6: fixed length and architecture filter ──────────────────────────────
+    # ── v7: thermodynamic parameters + pre-mRNA BLAST ─────────────────────────
+    parser.add_argument("--rna-params", default="sugimoto",
+        choices=["sugimoto", "santalucia"],
+        help=(
+            "Thermodynamic parameter set for duplex stability calculation. "
+            "'sugimoto' (default): Sugimoto 1995 RNA:DNA hybrid parameters "
+            "(PMID 7545436). Most accurate for MOE PS gapmer binding to RNA target. "
+            "Recommended by Frank Bennett (Ionis). "
+            "'santalucia': SantaLucia 1998 DNA:DNA parameters (legacy, v1-v6 behavior)."
+        ))
+    parser.add_argument("--premrna-blast", action="store_true",
+        help=(
+            "Include pre-mRNA (genomic sequence with introns) in off-target BLAST screening. "
+            "RNase H ASOs act in the nucleus and access pre-mRNA, making intronic sequences "
+            "legitimate off-target binding sites that mature mRNA BLAST misses. "
+            "Requires ALLELESELECT_GENOME_FASTA env variable pointing to a local hg38 FASTA. "
+            "Motivated by Stefan Hauser (DZNE Tubingen, personal communication 2026)."
+        ))
     parser.add_argument("--fixed-length", type=int, default=None,
         help=(
             "Generate only ASOs of this exact length (e.g. 20). "
@@ -163,10 +185,17 @@ def run(args) -> None:
 
     gene_label = args.gene if args.gene else args.transcript.split(".")[0]
 
-    # v6: fixed length override (for wet-lab screen comparison)
+    # v7: fixed length override (for wet-lab screen comparison)
     if args.fixed_length:
         args.aso_lengths = [args.fixed_length]
         print(f"[AlleleSelect] Fixed length mode: generating only {args.fixed_length}-mer candidates.")
+
+    # v7: thermodynamic parameter selection
+    rna_params = getattr(args, "rna_params", "sugimoto")
+    if rna_params != "sugimoto":
+        print(f"[AlleleSelect] Using {rna_params} thermodynamic parameters (legacy mode).")
+    else:
+        print(f"[AlleleSelect] Using Sugimoto 1995 RNA:DNA hybrid parameters (v7 default).")
 
     # 1. Parse HGVS variant
     print(f"[AlleleSelect] Parsing variant: {args.variant}")
@@ -189,6 +218,7 @@ def run(args) -> None:
         mutation_pos=parsed["position"],
         aso_lengths=args.aso_lengths,
         flank=args.flank,
+        rna_params=rna_params,
     )
     print(f"  {len(candidates)} candidates generated.")
 
@@ -232,6 +262,28 @@ def run(args) -> None:
         candidates = run_blast_offtarget(
             candidates, top_n=args.top_n_blast, gene_name=gene_label
         )
+        # v7: pre-mRNA off-target screening
+        if args.premrna_blast:
+            import os as _os
+            genome_fasta = _os.environ.get("ALLELESELECT_GENOME_FASTA", "")
+            if genome_fasta and _os.path.exists(genome_fasta):
+                print("[AlleleSelect] Running pre-mRNA off-target check (intronic regions)...")
+                from alleleselect.scoring.offtarget import run_blast_offtarget
+                premrna_db = _os.environ.get(
+                    "ALLELESELECT_PREMRNA_DB",
+                    _os.path.expanduser("~/alleleselect_data/hg38_premrna")
+                )
+                candidates = run_blast_offtarget(
+                    candidates, db_path=premrna_db,
+                    top_n=args.top_n_blast, gene_name=gene_label,
+                )
+                print("  Pre-mRNA off-target check complete.")
+            else:
+                print(
+                    "[AlleleSelect] --premrna-blast requested but ALLELESELECT_GENOME_FASTA "
+                    "is not set or file not found. Skipping pre-mRNA screening. "
+                    "Set env variable to path of hg38 FASTA to enable."
+                )
     else:
         print("[AlleleSelect] Skipping BLASTn (--no-blast).")
         from alleleselect.scoring.offtarget import _set_unscreened
@@ -257,7 +309,7 @@ def run(args) -> None:
     print("[AlleleSelect] Annotating gapmer modification patterns...")
     candidates = annotate_all_candidates(candidates)
 
-    # 7a. Architecture filter (v6) — must come after annotator which sets wing/gap lengths
+    # 7a. Architecture filter (v6) — parses recommended_gapmer_pattern string
     if args.gapmer_architecture:
         try:
             parts = [int(x) for x in args.gapmer_architecture.split("-")]
@@ -265,10 +317,29 @@ def run(args) -> None:
                 raise ValueError
             target_wing, target_gap, target_wing2 = parts
             before = len(candidates)
-            candidates = [
-                c for c in candidates
-                if c.get("wing_len") == target_wing and c.get("gap_len") == target_gap
-            ]
+
+            def matches_architecture(c):
+                # First try integer fields if present
+                if c.get("wing_len") is not None and c.get("gap_len") is not None:
+                    return (c["wing_len"] == target_wing and
+                            c["gap_len"] == target_gap)
+                # Fall back to parsing recommended_gapmer_pattern string
+                # e.g. "5MOE-10DNA-5MOE (all-PS backbone)" or "5MOE-10DNA-5MOE"
+                pattern = c.get("recommended_gapmer_pattern", "")
+                # Extract just the architecture part before any space
+                pattern = pattern.split(" ")[0]  # "5MOE-10DNA-5MOE"
+                p_parts = pattern.split("-")
+                if len(p_parts) >= 3:
+                    try:
+                        w1 = int("".join(filter(str.isdigit, p_parts[0])))
+                        g  = int("".join(filter(str.isdigit, p_parts[1])))
+                        w2 = int("".join(filter(str.isdigit, p_parts[2])))
+                        return w1 == target_wing and g == target_gap
+                    except (ValueError, IndexError):
+                        pass
+                return False
+
+            candidates = [c for c in candidates if matches_architecture(c)]
             print(
                 f"[AlleleSelect] Architecture filter ({args.gapmer_architecture}): "
                 f"{len(candidates)} of {before} candidates retained."
@@ -277,7 +348,8 @@ def run(args) -> None:
                 print(
                     f"  WARNING: no candidates match {args.gapmer_architecture}. "
                     f"Check that --fixed-length matches the architecture "
-                    f"(e.g. --fixed-length 20 --gapmer-architecture 5-10-5 requires length=20)."
+                    f"(e.g. --fixed-length 20 --gapmer-architecture 5-10-5 requires length=20 "
+                    f"and the annotator must assign 5-base wings to that sequence)."
                 )
         except ValueError:
             print(
