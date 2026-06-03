@@ -157,6 +157,12 @@ def build_parser() -> argparse.ArgumentParser:
         ))
     parser.add_argument("--verbose", action="store_true",
         help="Print detailed progress messages.")
+    parser.add_argument("--rnase-h-scoring", action="store_true",
+        help=(
+            "v8: Replace fixed triangular SNP position score with sequence-dependent "
+            "RNase H1 cleavage site prediction (Kielpinski 2017, R4b dinucleotide PWM). "
+            "Motivated by Emilio Harris-Mostert (Erasmus MC, personal communication 2026)."
+        ))
     return parser
 
 
@@ -357,8 +363,17 @@ def run(args) -> None:
                 f"WING-GAP-WING format (e.g. 5-10-5). Filter skipped."
             )
 
-    # 7b. SNP position scoring + toxicity + composite (v2/v4)
-    print("[AlleleSelect] Scoring SNP position and screening toxic sequences (v4)...")
+    # 7b. SNP position scoring + toxicity + composite (v2/v4/v8)
+    use_rnase_h = getattr(args, "rnase_h_scoring", False)
+    if use_rnase_h:
+        print("[AlleleSelect] Scoring SNP position using RNase H cleavage site model (v8, Kielpinski 2017)...")
+        try:
+            from alleleselect.scoring.rnase_h_scorer import compute_snp_rnase_h_position_score
+        except ImportError:
+            print("  WARNING: rnase_h_scorer not found. Falling back to triangular scoring.")
+            use_rnase_h = False
+    if not use_rnase_h:
+        print("[AlleleSelect] Scoring SNP position and screening toxic sequences (v4)...")
     SNP_CDS_POS = parsed["position"]
     WING_LEN    = 5
 
@@ -372,8 +387,23 @@ def run(args) -> None:
             snp_cds_pos=SNP_CDS_POS, wing_len=WING_LEN,
         )
         c["snp_pos_in_aso"] = pos_result["snp_pos_in_aso"]
-        c["snp_pos_score"]  = pos_result["snp_pos_score"]
         c["snp_region"]     = pos_result["snp_region"]
+
+        if use_rnase_h:
+            # v8: replace triangular score with RNase H cleavage site prediction
+            # Gap runs from wing_len to aso_len - wing_len (0-indexed in ASO)
+            # Convert to mRNA coordinates: gap_start = win_start + wing_len - 1 (0-indexed)
+            gap_start_mrna = (win_start - 1) + WING_LEN        # 0-indexed
+            gap_end_mrna   = (win_start - 1) + aso_len - WING_LEN  # 0-indexed exclusive
+            snp_pos_mrna   = SNP_CDS_POS - 1                   # 0-indexed
+            c["snp_pos_score"] = compute_snp_rnase_h_position_score(
+                snp_pos_in_mrna=snp_pos_mrna,
+                mrna_seq=mut_cds,
+                gap_start_in_mrna=gap_start_mrna,
+                gap_end_in_mrna=gap_end_mrna,
+            )
+        else:
+            c["snp_pos_score"] = pos_result["snp_pos_score"]
 
         tox = screen_toxic(aso_seq)
         c["tox_summary"] = tox["summary"]

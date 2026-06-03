@@ -180,12 +180,17 @@ def compute_snp_rnase_h_position_score(
     """
     Compute SNP position score using RNase H cleavage site prediction.
 
-    Instead of a fixed triangular peak at gap center (Ostergaard 2013),
-    this scores the SNP based on its distance from the predicted optimal
-    RNase H cleavage site. SNP closer to the cleavage site = higher score.
+    Scores based on predicted RNase H1 cleavage efficiency at the SNP position,
+    normalized relative to the maximum efficiency across the gap.
+
+    A score of 1.0 means the SNP sits at the position RNase H1 most prefers
+    to cleave in this specific sequence. A score near 0 means the SNP is at
+    a position the enzyme avoids.
 
     This replaces the static triangular scoring in snp_position.py when
-    --rnase-h-scoring is enabled.
+    --rnase-h-scoring is enabled. Unlike the triangular score (which peaks at
+    gap center regardless of sequence), this score is sequence-dependent and
+    shifts the peak to wherever RNase H1 is predicted to cleave most efficiently.
 
     Parameters
     ----------
@@ -193,18 +198,46 @@ def compute_snp_rnase_h_position_score(
     mrna_seq          : str, mRNA sequence
     gap_start_in_mrna : int, 0-indexed gap start
     gap_end_in_mrna   : int, 0-indexed gap end (exclusive)
-    sigma             : float, controls width of Gaussian scoring peak
+    sigma             : float, unused, kept for API compatibility
 
     Returns
     -------
-    float: score in [0, 1], 1.0 = SNP at optimal cleavage site
+    float: score in [0, 1], 1.0 = SNP at most efficient cleavage site
     """
     import math
-    optimal_pos, _ = get_optimal_cleavage_position(
-        mrna_seq, gap_start_in_mrna, gap_end_in_mrna
-    )
-    distance = abs(snp_pos_in_mrna - optimal_pos)
-    gap_length = gap_end_in_mrna - gap_start_in_mrna
-    # Gaussian decay from optimal position
-    score = math.exp(-(distance ** 2) / (2 * sigma ** 2))
-    return round(score, 4)
+
+    scores = score_rnase_h_cleavage(mrna_seq, gap_start_in_mrna, gap_end_in_mrna)
+
+    if not scores:
+        # Fallback: triangular score centered on gap center
+        gap_center = (gap_start_in_mrna + gap_end_in_mrna) / 2.0
+        half_width = (gap_end_in_mrna - gap_start_in_mrna) / 2.0
+        if half_width == 0:
+            return 0.5
+        dist = abs(snp_pos_in_mrna - gap_center)
+        return round(max(0.0, 1.0 - dist / half_width), 4)
+
+    # Normalize scores to [0, 1] range
+    # More negative = more preferred cleavage, so invert
+    # score_normalized = (max_score - score) / (max_score - min_score)
+    min_score = min(scores.values())
+    max_score = max(scores.values())
+
+    if max_score == min_score:
+        # All positions equally preferred — use triangular fallback
+        gap_center = (gap_start_in_mrna + gap_end_in_mrna) / 2.0
+        half_width = (gap_end_in_mrna - gap_start_in_mrna) / 2.0
+        dist = abs(snp_pos_in_mrna - gap_center)
+        return round(max(0.0, 1.0 - dist / half_width), 4)
+
+    # Score at SNP position — if SNP not directly scored, interpolate from nearest
+    if snp_pos_in_mrna in scores:
+        raw = scores[snp_pos_in_mrna]
+    else:
+        # Find nearest scored position
+        nearest = min(scores.keys(), key=lambda p: abs(p - snp_pos_in_mrna))
+        raw = scores[nearest]
+
+    # Invert: most negative (most preferred) maps to 1.0
+    normalized = (max_score - raw) / (max_score - min_score)
+    return round(float(normalized), 4)
