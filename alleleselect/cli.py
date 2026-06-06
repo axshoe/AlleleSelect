@@ -1,6 +1,6 @@
 """
 cli.py
-AlleleSelect command-line interface — v7
+AlleleSelect command-line interface — v8
 
 New in v7:
   --rna-params sugimoto|santalucia

@@ -2,10 +2,10 @@ from setuptools import setup, find_packages
 
 setup(
     name="alleleselect",
-    version="1.0.0",
+    version="0.8.0",
     author="Angie Xiu",
     author_email="angie.xiu27@gmail.com",
-    description="Allele-Selective ASO Design Pipeline for CACNA1A Gain-of-Function Mutations",
+    description="Allele-Selective ASO Design Pipeline for Dominant Neurological Mutations",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     url="https://github.com/axshoe/alleleselect",
