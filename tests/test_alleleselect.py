@@ -160,8 +160,8 @@ from alleleselect.scoring.allele_selectivity import score_candidate_window
 def test_asr_negative_for_mutant_targeting():
     """ASO designed for mutant should prefer mutant (negative ASR)."""
     # R192Q context: mutant has A at position 7, wt has G
-    mut_window = "AAGACCAAGAGCAAG"  # A at pos 7
-    wt_window  = "AAGACCGAGAGCAAG"  # G at pos 7
+    mut_window = "AAGACCCAGAGCAAG"  # C at pos 6
+    wt_window = "AAGACCAAGAGCAAG"  # A at pos 6
     aso = _reverse_complement(mut_window)
     result = score_candidate_window(aso, mut_window, wt_window)
     # ASO complements mutant perfectly, so dG_mutant < dG_wildtype => ASR < 0
